@@ -76,8 +76,9 @@ bool Collider::isPointInPolygon(const Vec2f& p, const RigidBody& poly) {
         Vec2f edge = v2 - v1;
         Vec2f toPoint = p - v1;
         
-        // 2D 叉乘：若小于 0 则点在边右侧，表明点在凸多边形外部 (假定逆时针定点序)
-        if (edge.cross(toPoint) < -0.01f) {
+        // 2D 叉乘：若大于 0 则点在边左侧（法线侧），表明点在多边形外部 
+        // （由于我们使用逆时针定点，且 Y 轴朝下，内部总是在边的右侧，即叉乘 < 0）
+        if (edge.cross(toPoint) > 0.01f) {
             return false;
         }
     }

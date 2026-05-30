@@ -58,7 +58,7 @@ template <> constexpr inline auto RenderCanvas::qt_create_metaobjectdata<qt_meta
             qt_methods, qt_properties, qt_enums);
 }
 Q_CONSTINIT const QMetaObject RenderCanvas::staticMetaObject = { {
-    QMetaObject::SuperData::link<QWidget::staticMetaObject>(),
+    QMetaObject::SuperData::link<QOpenGLWidget::staticMetaObject>(),
     qt_staticMetaObjectStaticContent<qt_meta_tag_ZN12RenderCanvasE_t>.stringdata,
     qt_staticMetaObjectStaticContent<qt_meta_tag_ZN12RenderCanvasE_t>.data,
     qt_static_metacall,
@@ -92,12 +92,14 @@ void *RenderCanvas::qt_metacast(const char *_clname)
     if (!_clname) return nullptr;
     if (!strcmp(_clname, qt_staticMetaObjectStaticContent<qt_meta_tag_ZN12RenderCanvasE_t>.strings))
         return static_cast<void*>(this);
-    return QWidget::qt_metacast(_clname);
+    if (!strcmp(_clname, "QOpenGLFunctions"))
+        return static_cast< QOpenGLFunctions*>(this);
+    return QOpenGLWidget::qt_metacast(_clname);
 }
 
 int RenderCanvas::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
 {
-    _id = QWidget::qt_metacall(_c, _id, _a);
+    _id = QOpenGLWidget::qt_metacall(_c, _id, _a);
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {

@@ -149,6 +149,8 @@ D:/c++big_homework/build/QtTest_autogen/MXUWEOXILK/moc_MainWindow.cpp: D:/c++big
   D:/QT/6.11.1/mingw_64/include/QtCore/qxptype_traits.h \
   D:/QT/6.11.1/mingw_64/include/QtCore/qyieldcpu.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/QMouseEvent \
+  D:/QT/6.11.1/mingw_64/include/QtGui/QOpenGLFunctions \
+  D:/QT/6.11.1/mingw_64/include/QtGui/QSurfaceFormat \
   D:/QT/6.11.1/mingw_64/include/QtGui/QTransform \
   D:/QT/6.11.1/mingw_64/include/QtGui/qaction.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qbitmap.h \
@@ -161,6 +163,7 @@ D:/c++big_homework/build/QtTest_autogen/MXUWEOXILK/moc_MainWindow.cpp: D:/c++big
   D:/QT/6.11.1/mingw_64/include/QtGui/qfontinfo.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qfontmetrics.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qfontvariableaxis.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qgenericmatrix.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qguiapplication.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qguiapplication_platform.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qicon.h \
@@ -168,6 +171,12 @@ D:/c++big_homework/build/QtTest_autogen/MXUWEOXILK/moc_MainWindow.cpp: D:/c++big
   D:/QT/6.11.1/mingw_64/include/QtGui/qinputdevice.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qinputmethod.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qkeysequence.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qmatrix4x4.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qopengl.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qopenglcontext.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qopenglcontext_platform.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qopenglext.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qopenglfunctions.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qpaintdevice.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qpalette.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qpicture.h \
@@ -180,15 +189,30 @@ D:/c++big_homework/build/QtTest_autogen/MXUWEOXILK/moc_MainWindow.cpp: D:/c++big
   D:/QT/6.11.1/mingw_64/include/QtGui/qrgba64.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qscreen.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qscreen_platform.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qsurfaceformat.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qtextdocument.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qtgui-config.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qtguiexports.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qtguiglobal.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qtransform.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qvector2d.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qvector3d.h \
+  D:/QT/6.11.1/mingw_64/include/QtGui/qvector4d.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qvectornd.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qwindowdefs.h \
   D:/QT/6.11.1/mingw_64/include/QtGui/qwindowdefs_win.h \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGL/QOpenGLBuffer \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGL/QOpenGLShaderProgram \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGL/QOpenGLVertexArrayObject \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGL/qopenglbuffer.h \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGL/qopenglshaderprogram.h \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGL/qopenglvertexarrayobject.h \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGL/qtopenglexports.h \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGL/qtopenglglobal.h \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGLWidgets/QOpenGLWidget \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGLWidgets/qopenglwidget.h \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGLWidgets/qtopenglwidgetsexports.h \
+  D:/QT/6.11.1/mingw_64/include/QtOpenGLWidgets/qtopenglwidgetsglobal.h \
   D:/QT/6.11.1/mingw_64/include/QtWidgets/QFormLayout \
   D:/QT/6.11.1/mingw_64/include/QtWidgets/QGroupBox \
   D:/QT/6.11.1/mingw_64/include/QtWidgets/QHBoxLayout \
@@ -396,6 +420,7 @@ D:/c++big_homework/build/QtTest_autogen/MXUWEOXILK/moc_MainWindow.cpp: D:/c++big
   D:/QT/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/stddef.h \
   D:/QT/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/stdint.h \
   D:/QT/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/syslimits.h \
+  D:/QT/Tools/mingw1310_64/x86_64-w64-mingw32/include/GL/gl.h \
   D:/QT/Tools/mingw1310_64/x86_64-w64-mingw32/include/_mingw.h \
   D:/QT/Tools/mingw1310_64/x86_64-w64-mingw32/include/_mingw_mac.h \
   D:/QT/Tools/mingw1310_64/x86_64-w64-mingw32/include/_mingw_off_t.h \

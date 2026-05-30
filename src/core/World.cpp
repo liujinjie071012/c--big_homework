@@ -138,6 +138,13 @@ void PhysicsWorld::integrate(float sdt) {
     for (auto& p : m_particles) {
         if (p.isStatic) continue;
         p.velocity += (p.force / p.mass) * sdt;
+
+        // 限制粒子最大速度，防止高压下速度爆炸导致穿墙
+        float maxSpeed = 1500.0f;
+        if (p.velocity.lengthSquared() > maxSpeed * maxSpeed) {
+            p.velocity = p.velocity.normalized() * maxSpeed;
+        }
+
         p.position += p.velocity * sdt;
         p.force = Vec2f(0.0f, 0.0f);
     }
@@ -148,10 +155,24 @@ void PhysicsWorld::integrate(float sdt) {
         
         // 辛欧拉平动积分
         b.velocity += (b.force * b.invMass) * sdt;
+        
+        // 限制最大平动速度，防止在高压挤压下速度爆炸导致穿模
+        float maxSpeed = 2000.0f; 
+        if (b.velocity.lengthSquared() > maxSpeed * maxSpeed) {
+            b.velocity = b.velocity.normalized() * maxSpeed;
+        }
+
         b.position += b.velocity * sdt;
 
         // 辛欧拉转动积分
         b.angularVelocity += (b.torque * b.invInertia) * sdt;
+        
+        // 限制最大角速度
+        float maxAngular = 50.0f;
+        if (std::abs(b.angularVelocity) > maxAngular) {
+            b.angularVelocity = (b.angularVelocity > 0.0f) ? maxAngular : -maxAngular;
+        }
+
         b.angle += b.angularVelocity * sdt;
 
         // 重新缓存刚体的世界顶点坐标数据
@@ -200,30 +221,30 @@ void PhysicsWorld::resolveWallCollisions(Particle& p) {
         if (abLenSq == 0.0f) continue;
 
         // 投影求最近点系数 t
-        float t = ap.dot(ab) / abLenSq;
-        t = std::max(0.0f, std::min(1.0f, t)); // 截断到线段区间内
+        float t = std::max(0.0f, std::min(1.0f, ap.dot(ab) / abLenSq));
 
         Vec2f closest = wall.start + ab * t;
-        float dist = p.position.distance(closest);
+        Vec2f diff = p.position - closest;
+        float distSq = diff.lengthSquared();
 
-        if (dist < p.radius && dist > 0.0f) {
-            // 发生碰撞，计算法线 (墙指向粒子)
-            Vec2f normal = (p.position - closest) / dist;
+        // 放弃单面的 SDF 检测，恢复为双面纯距离检测。
+        // 因为我们已经加入了 Velocity Clamping（最大单步位移被限制在 6 像素），
+        // 且半径为 3 像素，所以粒子不可能在单步内完全跨越墙体，
+        // 纯距离检测不仅完全安全，而且能完美支持双面碰撞，绝不会产生“黑洞吸附”现象。
+        if (distSq > 0.0001f && distSq < p.radius * p.radius) {
+            float dist = std::sqrt(distSq);
+            Vec2f normal = diff / dist;
             float penetration = p.radius - dist;
 
-            // 1. 位置纠正（推开粒子，防止陷进墙体）
+            // 1. 位置纠正（强制推出）
             p.position += normal * penetration;
 
-            // 2. 速度反射 (计算法向速度)
+            // 2. 速度反射
             float vNormal = p.velocity.dot(normal);
             if (vNormal < 0.0f) {
-                // 弹性系数
                 float elasticity = config.particleElasticity;
-                
-                // 法向反射与切向摩擦阻尼
                 Vec2f tangent(-normal.y, normal.x);
                 float vTangent = p.velocity.dot(tangent);
-
                 p.velocity = tangent * vTangent * 0.95f - normal * vNormal * elasticity;
             }
         }
@@ -308,14 +329,16 @@ void PhysicsWorld::resolveCollisions() {
     // ==========================================
     // 2.5 粒子-墙体/边界 二次加固校验 (Post-Pass)
     //     粒子-粒子 和 粒子-刚体 碰撞解算可能把粒子推穿墙壁，
-    //     这里再做一次强制位置夹紧，防止高密度下穿透。
+    //     这里做两轮强制位置夹紧，防止高密度下穿透。
     // ==========================================
     if (pCount > 0) {
-        for (int i = 0; i < pCount; ++i) {
-            Particle& p = m_particles[i];
-            if (p.isStatic) continue;
-            resolveBoundaryCollisions(p);
-            resolveWallCollisions(p);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int i = 0; i < pCount; ++i) {
+                Particle& p = m_particles[i];
+                if (p.isStatic) continue;
+                resolveBoundaryCollisions(p);
+                resolveWallCollisions(p);
+            }
         }
     }
 
@@ -530,23 +553,46 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
     float e = b.restitution;
 
     if (b.shape == ShapeType::Circle) {
-        // 圆形刚体 vs 墙壁线段：点到线段最短距离
+        // 圆形刚体 vs 墙壁线段 (支持深穿透检测)
         for (const auto& wall : m_walls) {
             Vec2f ab = wall.end - wall.start;
-            Vec2f ap = b.position - wall.start;
-
             float abLenSq = ab.lengthSquared();
             if (abLenSq == 0.0f) continue;
 
+            Vec2f wallNormal(-ab.y, ab.x);
+            float wallLen = wallNormal.length();
+            wallNormal = wallNormal / wallLen;
+
+            // 确保法线指向刚体所在方向
+            if ((b.position - wall.start).dot(wallNormal) < 0.0f) {
+                wallNormal *= -1.0f;
+            }
+
+            Vec2f ap = b.position - wall.start;
             float t = ap.dot(ab) / abLenSq;
-            t = std::max(0.0f, std::min(1.0f, t));
+            float tClamped = std::max(0.0f, std::min(1.0f, t));
+            Vec2f closest = wall.start + ab * tClamped;
 
-            Vec2f closest = wall.start + ab * t;
-            float dist = b.position.distance(closest);
+            Vec2f toCenter = b.position - closest;
+            float signedDist = toCenter.dot(wallNormal);
+            float dist = toCenter.length();
 
-            if (dist < b.radius && dist > 0.0f) {
-                Vec2f normal = (b.position - closest) / dist;
-                float penetration = b.radius - dist;
+            // 切向偏离（用于避免把平行于墙壁且很远的对象判定为碰撞）
+            float tangentDistSq = std::max(0.0f, dist * dist - signedDist * signedDist);
+
+            // 发生浅穿透 或 深穿透 (无深度限制，只要在切向范围内即可)
+            if (signedDist < b.radius && tangentDistSq < b.radius * b.radius) {
+                // 默认使用墙壁法线（特别是在深穿透时极其重要，避免法线翻转）
+                Vec2f normal = wallNormal;
+                float penetration = b.radius - signedDist;
+
+                // 如果是端点的浅穿透，使用真实的圆角法线
+                if (signedDist > 0.0f && dist > 0.0f && (t < 0.0f || t > 1.0f)) {
+                    normal = toCenter / dist;
+                    penetration = b.radius - dist;
+                    // 如果真正的端点距离大于半径，说明只是擦过延伸线，并未真正撞到端点
+                    if (dist > b.radius) continue; 
+                }
 
                 // 位置纠正
                 b.position += normal * penetration;
@@ -581,7 +627,7 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
         }
     }
     else if (b.shape == ShapeType::Polygon) {
-        // 多边形刚体 vs 墙壁线段：逐顶点检测穿透
+        // 多边形刚体 vs 墙壁线段：逐顶点深穿透检测
         b.updateGlobalVertices();
 
         for (const auto& wall : m_walls) {
@@ -589,13 +635,11 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
             float abLenSq = ab.lengthSquared();
             if (abLenSq == 0.0f) continue;
 
-            // 求墙壁法线 (取其中一个方向，在碰撞时选指向刚体质心的方向)
             Vec2f wallNormal(-ab.y, ab.x);
             float wallLen = wallNormal.length();
             if (wallLen == 0.0f) continue;
             wallNormal = wallNormal / wallLen;
 
-            // 确保法线指向刚体质心方向
             Vec2f toBody = b.position - wall.start;
             if (toBody.dot(wallNormal) < 0.0f) {
                 wallNormal = wallNormal * (-1.0f);
@@ -604,29 +648,29 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
             Vec2f totalCorrection(0.0f, 0.0f);
             int collisionCount = 0;
             float maxPenetration = 0.0f;
-            Vec2f bestContact = b.position; // 记录最深穿透对应的接触点
+            Vec2f bestContact = b.position; 
 
             for (const auto& v : b.globalVertices) {
                 Vec2f vp = v - wall.start;
                 float tProj = vp.dot(ab) / abLenSq;
-                tProj = std::max(0.0f, std::min(1.0f, tProj));
+                float tClamped = std::max(0.0f, std::min(1.0f, tProj));
 
-                Vec2f closest = wall.start + ab * tProj;
-                float dist = v.distance(closest);
-
-                // 检测顶点是否穿过墙壁线段 (在墙壁法线反方向)
+                Vec2f closest = wall.start + ab * tClamped;
                 Vec2f toVertex = v - closest;
+                float dist = toVertex.length();
                 float signedDist = toVertex.dot(wallNormal);
 
-                // 渗透阈值：顶点距墙壁很近或已经穿过（signedDist < 0）
-                float threshold = 2.0f; // 像素阈值
-                if (signedDist < threshold && dist < threshold * 2.0f) {
+                float tangentDistSq = std::max(0.0f, dist * dist - signedDist * signedDist);
+
+                // 渗透阈值：移除深穿透限制，允许高压下的无限深穿透纠正，只要切向偏离不离谱（<20像素）即可
+                float threshold = 2.0f; 
+                if (signedDist < threshold && tangentDistSq < 400.0f) {
                     float penetration = threshold - signedDist;
                     totalCorrection += wallNormal * penetration;
                     collisionCount++;
                     if (penetration > maxPenetration) {
                         maxPenetration = penetration;
-                        bestContact = v; // 用顶点作为碰撞接触点
+                        bestContact = v; // 用该穿透最深的顶点作为施加力的接触点
                     }
                 }
             }
@@ -636,7 +680,7 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
                 b.position += totalCorrection / static_cast<float>(collisionCount);
                 b.updateGlobalVertices();
 
-                // 速度反射与摩擦转动 (使用最大穿透点作为代表性接触点)
+                // 速度反射与摩擦转动
                 Vec2f r = bestContact - b.position;
                 Vec2f vRel = b.velocity + Vec2f(-b.angularVelocity * r.y, b.angularVelocity * r.x);
                 float vNormal = vRel.dot(wallNormal);

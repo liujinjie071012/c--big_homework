@@ -1,15 +1,19 @@
 #pragma once
 
-#include <QWidget>
+#include <QOpenGLWidget>
+#include <QOpenGLFunctions>
+#include <QOpenGLShaderProgram>
+#include <QOpenGLBuffer>
+#include <QOpenGLVertexArrayObject>
 #include <QMouseEvent>
 #include <QElapsedTimer>
 #include "../core/World.hpp"
 
-class RenderCanvas : public QWidget {
+class RenderCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
     Q_OBJECT
 public:
     RenderCanvas(PhysicsWorld* world, QWidget* parent = nullptr);
-    ~RenderCanvas() = default;
+    ~RenderCanvas();
 
     void setPaused(bool paused) { m_paused = paused; }
     bool isPaused() const { return m_paused; }
@@ -25,7 +29,12 @@ signals:
     void mousePositionChanged(const QString& posStr);
 
 protected:
-    void paintEvent(QPaintEvent* event) override;
+    // QOpenGLWidget 核心生命周期函数
+    void initializeGL() override;
+    void resizeGL(int w, int h) override;
+    void paintGL() override;
+
+    // 鼠标交互事件
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -47,5 +56,14 @@ private:
     float m_physicsTimeMs;
     float m_renderTimeMs;
 
+    // OpenGL 核心对象
+    QOpenGLShaderProgram* m_shader;
+    QOpenGLBuffer m_vbo;
+    QOpenGLVertexArrayObject m_vao;
+
+    // 缓存矩阵
+    QMatrix4x4 m_projectionMatrix;
+
     void drawPerformanceOverlay(QPainter& painter);
+    void updatePhysics();
 };

@@ -20,12 +20,11 @@ CMAKE_ADDR2LINE:FILEPATH=D:/QT/Tools/mingw1310_64/bin/addr2line.exe
 //Path to a program.
 CMAKE_AR:FILEPATH=D:/QT/Tools/mingw1310_64/bin/ar.exe
 
-//Choose the type of build, options are: None Debug Release RelWithDebInfo
-// MinSizeRel ...
-CMAKE_BUILD_TYPE:STRING=
+//No help, variable specified on the command line.
+CMAKE_BUILD_TYPE:STRING=Debug
 
-//CXX compiler
-CMAKE_CXX_COMPILER:FILEPATH=D:/QT/Tools/mingw1310_64/bin/c++.exe
+//No help, variable specified on the command line.
+CMAKE_CXX_COMPILER:FILEPATH=D:/QT/Tools/mingw1310_64/bin/g++.exe
 
 //A wrapper around 'ar' adding the appropriate '--plugin' option
 // for the GCC compiler
@@ -53,6 +52,9 @@ CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG
 //Libraries linked by default with all C++ applications.
 CMAKE_CXX_STANDARD_LIBRARIES:STRING=-lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32
 
+//No help, variable specified on the command line.
+CMAKE_C_COMPILER:FILEPATH=D:/QT/Tools/mingw1310_64/bin/gcc.exe
+
 //Path to a program.
 CMAKE_DLLTOOL:FILEPATH=D:/QT/Tools/mingw1310_64/bin/dlltool.exe
 
@@ -71,8 +73,8 @@ CMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=
 //Flags used by the linker during RELWITHDEBINFO builds.
 CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO:STRING=
 
-//Enable/Disable output of compile commands during generation.
-CMAKE_EXPORT_COMPILE_COMMANDS:BOOL=
+//No help, variable specified on the command line.
+CMAKE_EXPORT_COMPILE_COMMANDS:BOOL=TRUE
 
 //Value Computed by CMake.
 CMAKE_FIND_PACKAGE_REDIRECTS_DIR:STATIC=D:/c++big_homework/build/CMakeFiles/pkgRedirects
@@ -135,7 +137,7 @@ CMAKE_INSTALL_SYSCONFDIR:PATH=etc
 CMAKE_LINKER:FILEPATH=D:/QT/Tools/mingw1310_64/bin/ld.exe
 
 //No help, variable specified on the command line.
-CMAKE_MAKE_PROGRAM:UNINITIALIZED=D:/QT/Tools/Ninja/ninja.exe
+CMAKE_MAKE_PROGRAM:STRING=D:/QT/Tools/Ninja/ninja.exe
 
 //Flags used by the linker during the creation of modules during
 // all build types.
@@ -297,6 +299,12 @@ Qt6GuiTools_DIR:PATH=D:/QT/6.11.1/mingw_64/lib/cmake/Qt6GuiTools
 //The directory containing a CMake configuration file for Qt6Gui.
 Qt6Gui_DIR:PATH=D:/QT/6.11.1/mingw_64/lib/cmake/Qt6Gui
 
+//The directory containing a CMake configuration file for Qt6OpenGLWidgets.
+Qt6OpenGLWidgets_DIR:PATH=D:/QT/6.11.1/mingw_64/lib/cmake/Qt6OpenGLWidgets
+
+//The directory containing a CMake configuration file for Qt6OpenGL.
+Qt6OpenGL_DIR:PATH=D:/QT/6.11.1/mingw_64/lib/cmake/Qt6OpenGL
+
 //The directory containing a CMake configuration file for Qt6WidgetsTools.
 Qt6WidgetsTools_DIR:PATH=D:/QT/6.11.1/mingw_64/lib/cmake/Qt6WidgetsTools
 
@@ -387,8 +395,6 @@ CMAKE_EXE_LINKER_FLAGS_MINSIZEREL-ADVANCED:INTERNAL=1
 CMAKE_EXE_LINKER_FLAGS_RELEASE-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO
 CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1
-//ADVANCED property for variable: CMAKE_EXPORT_COMPILE_COMMANDS
-CMAKE_EXPORT_COMPILE_COMMANDS-ADVANCED:INTERNAL=1
 //Name of external makefile project generator.
 CMAKE_EXTRA_GENERATOR:INTERNAL=
 //Name of generator.
