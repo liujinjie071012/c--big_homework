@@ -1,0 +1,11 @@
+{
+    "cmake.cmakePath": "D:/QT/Tools/CMake_64/bin/cmake.exe",
+    "cmake.generator": "Ninja",
+    "cmake.buildEnvironment": {
+        "PATH": "${env:PATH};D:\\QT\\Tools\\Ninja;D:\\QT\\Tools\\mingw1310_64\\bin;D:\\QT\\6.11.1\\mingw_64\\bin"
+    },
+    "cmake.environment": {
+        "PATH": "${env:PATH};D:\\QT\\Tools\\mingw1310_64\\bin;D:\\QT\\6.11.1\\mingw_64\\bin"
+    },
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
+}

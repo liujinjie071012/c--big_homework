@@ -1,0 +1,27 @@
+# ninja log v6
+9	219	8018272472746468	QtTest_autogen/mocs_compilation.cpp	a28606633561165c
+9	219	8018272472746468	QtTest_autogen/timestamp	a28606633561165c
+9	219	8018272472746468	D:/c++big_homework/build/QtTest_autogen/timestamp	a28606633561165c
+789	1335	8018166911095540	CMakeFiles/QtTest.dir/src/core/SpatialHash.cpp.obj	9eb853e5fafafef7
+9	219	8018272472746468	D:/c++big_homework/build/QtTest_autogen/mocs_compilation.cpp	a28606633561165c
+225	1123	8018272474910195	CMakeFiles/QtTest.dir/src/core/World.cpp.obj	b38b1af6b4a6b5fd
+810	2502	8018266549893168	CMakeFiles/QtTest.dir/main.cpp.obj	353a1a413d4f3363
+269	2076	8018272475352853	CMakeFiles/QtTest.dir/src/gui/RenderCanvas.cpp.obj	cca81847e39a82b4
+781	2689	8018266549604388	CMakeFiles/QtTest.dir/QtTest_autogen/mocs_compilation.cpp.obj	47c880c2d4e2d27e
+292	2222	8018272475583701	CMakeFiles/QtTest.dir/src/gui/MainWindow.cpp.obj	dd019945c37e6794
+281	749	8018167086991263	CMakeFiles/QtTest.dir/src/core/rigidbody/Collider.cpp.obj	24263a848ad0372f
+2222	2573	8018272494881147	QtTest.exe	9093130bc1d6e662
+233	595	8018255605427755	CMakeFiles/QtTest.dir/src/core/fluid/SPHSolver.cpp.obj	759e9d21e8e0993c
+901	1347	8018166912224068	CMakeFiles/QtTest.dir/src/core/rigidbody/Solver.cpp.obj	bc3c9a1c9dac5d17
+21	226	8018274162743015	QtTest_autogen/timestamp	a28606633561165c
+21	226	8018274162743015	QtTest_autogen/mocs_compilation.cpp	a28606633561165c
+21	226	8018274162743015	D:/c++big_homework/build/QtTest_autogen/timestamp	a28606633561165c
+21	226	8018274162743015	D:/c++big_homework/build/QtTest_autogen/mocs_compilation.cpp	a28606633561165c
+227	1011	8018274164811850	CMakeFiles/QtTest.dir/src/core/World.cpp.obj	b38b1af6b4a6b5fd
+1011	1315	8018274172655111	QtTest.exe	9093130bc1d6e662
+8	218	8018274924985050	QtTest_autogen/timestamp	a28606633561165c
+8	218	8018274924985050	QtTest_autogen/mocs_compilation.cpp	a28606633561165c
+8	218	8018274924985050	D:/c++big_homework/build/QtTest_autogen/timestamp	a28606633561165c
+8	218	8018274924985050	D:/c++big_homework/build/QtTest_autogen/mocs_compilation.cpp	a28606633561165c
+219	2127	8018274927086934	CMakeFiles/QtTest.dir/src/gui/MainWindow.cpp.obj	dd019945c37e6794
+2128	2434	8018274946178445	QtTest.exe	9093130bc1d6e662
