@@ -14,6 +14,26 @@
 \usepackage{titlesec}
 \usepackage{fancyhdr}
 \usepackage[ruled,linesnumbered,vlined]{algorithm2e} % 优雅的伪代码排版
+\usepackage{listings} % 支持代码块排版
+\lstset{
+    basicstyle=\small\ttfamily,
+    keywordstyle=\color{navyblue}\bfseries,
+    commentstyle=\color{gray}\itshape,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=8pt,
+    backgroundcolor=\color{black!5},
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    frame=single,
+    tabsize=4,
+    captionpos=b,
+    breaklines=true,
+    breakatwhitespace=false,
+    escapeinside={\%*}{*)}
+}
 
 % 配色方案与超链接设置
 \definecolor{navyblue}{RGB}{20, 50, 110}
@@ -258,7 +278,7 @@ j_t = \frac{- \mathbf{v}_{\text{rel}} \cdot \mathbf{t}}{ \frac{1}{m_A} + \frac{1
         fragColor = vec4(particleColor.rgb, particleColor.a * alpha);
     }
     \end{lstlisting}
-    这使得大规模渲染耗时从 CPU 的近百毫秒，**直接骤降并死死稳在 $< 1.0\text{ ms}$ 之内**，将所有 CPU 计算算力全部返还给物理引擎。
+    这使得大规模渲染耗时从 CPU 的近百毫秒，\textbf{直接骤降并死死稳在 $< 1.0\text{ ms}$ 之内}，将所有 CPU 计算算力全部返还给物理引擎。
 \end{enumerate}
 
 \subsubsection{原因二：多线程并行解算下的堆内存分配冲突与全局互斥锁竞争}
@@ -351,7 +371,7 @@ C[k] = \sum_{j \le k} \text{Count}[j]
 在极限的碰撞与重力高压实验中，我们在上万个粒子层叠堆积的情况下，用力拉动高阻尼多边形物块撞击单线段斜墙：
 \begin{itemize}
     \item \textbf{重构前（无 CCD、无符号 SDF、无速度锁）}：物块在受高频挤压时瞬间出现速度爆炸，刚体在 1 帧内有超过 $85\%$ 的概率瞬间隧道穿模飞出屏幕，且粒子有大面积吸入并死卡在矩形内部的现象。
-    \item \textbf{重构后（SDF + CCD + 速度锁截断 + 叉乘符号纠正）}：进行 1000 次极限的高压对撞碰撞测试，穿模逃逸率**下降为 0%**，即使是在物体极速穿透或受高压水柱强力冲刷下，双层线段和单层墙段依然充当了“硬几何屏蔽”，粒子和刚体全部被坚固地弹回，完美收敛。
+    \item \textbf{重构后（SDF + CCD + 速度锁截断 + 叉乘符号纠正）}：进行 1000 次极限的高压对撞碰撞测试，穿模逃逸率\textbf{下降为 0\%}，即使是在物体极速穿透或受高压水柱强力冲刷下，双层线段和单层墙段依然充当了“硬几何屏蔽”，粒子和刚体全部被坚固地弹回，完美收敛。
 \end{itemize}
 
 \section{结论}
