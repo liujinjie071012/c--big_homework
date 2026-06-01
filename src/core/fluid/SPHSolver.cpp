@@ -1,4 +1,7 @@
 #include "SPHSolver.hpp"
+#include "../World.hpp"
+#include <immintrin.h>
+#include <algorithm>
 #include <cmath>
 
 const float PI = 3.1415926535f;
@@ -7,34 +10,48 @@ float SPHSolver::poly6Kernel(float rSq, float h) const {
     float hSq = h * h;
     if (rSq >= hSq) return 0.0f;
     
-    // 315 / (64 * PI * h^9) * (h^2 - r^2)^3
-    float coeff = 315.0f / (64.0f * PI * std::pow(h, 9.0f));
+    static float cached_h = -1.0f;
+    static float cached_coeff = 0.0f;
+    if (h != cached_h) {
+        cached_h = h;
+        cached_coeff = 4.0f / (PI * std::pow(h, 8.0f));
+    }
+    
     float diff = hSq - rSq;
-    return coeff * diff * diff * diff;
+    return cached_coeff * diff * diff * diff;
 }
 
 Vec2f SPHSolver::spikyKernelGradient(const Vec2f& rVec, float r, float h) const {
-    if (r >= h || r <= 0.0f) return Vec2f(0.0f, 0.0f);
+    if (r >= h || r <= 1e-5f) return Vec2f(0.0f, 0.0f);
     
-    // -45 / (PI * h^6) * (h - r)^2 * (rVec / r)
-    float coeff = -45.0f / (PI * std::pow(h, 6.0f));
+    static float cached_h = -1.0f;
+    static float cached_coeff = 0.0f;
+    if (h != cached_h) {
+        cached_h = h;
+        cached_coeff = -30.0f / (PI * std::pow(h, 5.0f));
+    }
+    
     float diff = h - r;
-    return coeff * diff * diff * (rVec / r);
+    return cached_coeff * diff * diff * (rVec / r);
 }
 
 float SPHSolver::viscosityKernelLaplacian(float r, float h) const {
     if (r >= h) return 0.0f;
     
-    // 45 / (PI * h^6) * (h - r)
-    float coeff = 45.0f / (PI * std::pow(h, 6.0f));
-    return coeff * (h - r);
+    static float cached_h = -1.0f;
+    static float cached_coeff = 0.0f;
+    if (h != cached_h) {
+        cached_h = h;
+        cached_coeff = 40.0f / (PI * std::pow(h, 5.0f));
+    }
+    
+    return cached_coeff * (h - r);
 }
 
-void SPHSolver::updateSPH(std::vector<Particle>& particles, 
-                         const SpatialHash& spatialHash, 
-                         const PhysicsConfig& config,
-                         const std::vector<Vec2f>& positions) {
-    int pCount = static_cast<int>(particles.size());
+void SPHSolver::updateSPH(ParticlesSoA& particles, 
+                           const FlatNeighborList& neighborList, 
+                           const PhysicsConfig& config) {
+    int pCount = particles.count;
     if (pCount == 0) return;
 
     float h = config.fluidRadius;
@@ -43,94 +60,138 @@ void SPHSolver::updateSPH(std::vector<Particle>& particles,
     float restDensity = config.fluidRestDensity;
     float stiffness = config.fluidStiffness;
     float viscosity = config.fluidViscosity;
+    float maxPressure = stiffness * restDensity * 6.0f;
+    float maxFluidForce = mass * std::max(4500.0f, std::abs(config.gravity.y) * 12.0f);
 
-    // 预计算核函数系数以提升循环内部性能
-    float h3 = h * h * h;
-    float h6 = h3 * h3;
-    float h9 = h6 * h3;
-    float poly6Coeff = 315.0f / (64.0f * PI * h9);
-    float spikyCoeff = -45.0f / (PI * h6);
-    float viscCoeff = 45.0f / (PI * h6);
+    // 预计算 2D 核函数系数以提升循环内部性能
+    float h2 = h * h;
+    float h4 = h2 * h2;
+    float h5 = h4 * h;
+    float h8 = h4 * h4;
+    float poly6Coeff = 4.0f / (PI * h8);
+    float spikyCoeff = -30.0f / (PI * h5);
+    float viscCoeff = 40.0f / (PI * h5);
 
     // ==========================================
-    // 1. 密度与压力计算阶段
+    // 1. 密度与压力计算阶段 (SSE2 向量化，每4邻居并行)
     // ==========================================
+    #pragma omp parallel for schedule(static, 128)
     for (int i = 0; i < pCount; ++i) {
-        Particle& pA = particles[i];
-        if (pA.type != ParticleType::Fluid) continue;
+        if (particles.type[i] != ParticleType::Fluid) continue;
 
-        pA.density = 0.0f;
-        
-        // 空间哈希网格邻域查询
-        spatialHash.query(pA.position, h, positions, m_neighbors);
+        int start = neighborList.begin[i];
+        int end = neighborList.end[i];
+        int n = end - start;
 
-        for (int jIdx : m_neighbors) {
-            const Particle& pB = particles[jIdx];
-            if (pB.type != ParticleType::Fluid) continue;
+        const float* posX = particles.posX.data();
+        const float* posY = particles.posY.data();
+        const int* nbrs = neighborList.data.data() + start;
 
-            float distSq = pA.position.distanceSquared(pB.position);
-            if (distSq < hSq) {
-                // 累计密度项 (核函数叠加)
-                float diff = hSq - distSq;
-                pA.density += mass * (poly6Coeff * diff * diff * diff);
+        // 【极致优化二】SSE2 向量化：4 邻居并行
+        const __m128 px  = _mm_set1_ps(particles.posX[i]);
+        const __m128 py  = _mm_set1_ps(particles.posY[i]);
+        const __m128 H2  = _mm_set1_ps(hSq);
+        const __m128 C   = _mm_set1_ps(poly6Coeff);
+        __m128 acc       = _mm_setzero_ps();
+
+        int k = 0;
+        for (; k + 3 < n; k += 4) {
+            int j0 = nbrs[k], j1 = nbrs[k+1], j2 = nbrs[k+2], j3 = nbrs[k+3];
+
+            // Gather：从连续物理数组中打包邻居位置坐标
+            __m128 jx = _mm_set_ps(posX[j3], posX[j2], posX[j1], posX[j0]);
+            __m128 jy = _mm_set_ps(posY[j3], posY[j2], posY[j1], posY[j0]);
+
+            __m128 dx = _mm_sub_ps(px, jx);
+            __m128 dy = _mm_sub_ps(py, jy);
+            __m128 r2 = _mm_add_ps(_mm_mul_ps(dx, dx), _mm_mul_ps(dy, dy));
+
+            __m128 mask = _mm_cmplt_ps(r2, H2);         // r2 < h² 过滤掩码
+            __m128 q    = _mm_sub_ps(H2, r2);           // h² - r²
+            __m128 q3   = _mm_mul_ps(_mm_mul_ps(q, q), q);
+            acc = _mm_add_ps(acc, _mm_and_ps(_mm_mul_ps(C, q3), mask));
+        }
+
+        // 水平累加 SIMD 四通道结果
+        alignas(16) float temp[4];
+        _mm_store_ps(temp, acc);
+        float localDensity = temp[0] + temp[1] + temp[2] + temp[3];
+
+        // 尾部标量处理 (不足4个的部分)
+        for (; k < n; ++k) {
+            int j = nbrs[k];
+            float dx = particles.posX[i] - posX[j];
+            float dy = particles.posY[i] - posY[j];
+            float r2 = dx*dx + dy*dy;
+            if (r2 < hSq) {
+                float diff = hSq - r2;
+                localDensity += poly6Coeff * diff * diff * diff;
             }
         }
 
-        // 避免分母为 0 引起除零崩溃
-        if (pA.density < restDensity) {
-            pA.density = restDensity;
-        }
+        // 自身粒子质量及核函数贡献
+        localDensity *= mass;
+        localDensity += mass * poly6Coeff * (hSq * hSq * hSq);
 
-        // 使用 Tait 状态方程计算粒子处的状态压力
-        pA.pressure = stiffness * (pA.density - restDensity);
+        particles.density[i] = localDensity;
+        float rhoForPressure = std::max(localDensity, restDensity);
+        particles.pressure[i] = std::min(stiffness * (rhoForPressure - restDensity), maxPressure);
     }
 
     // ==========================================
-    // 2. 压力梯度力与粘性剪切力求解阶段
+    // 2. 压力梯度力与粘性剪切力求解阶段 (SoA 并行求解)
     // ==========================================
+    #pragma omp parallel for schedule(static, 128)
     for (int i = 0; i < pCount; ++i) {
-        Particle& pA = particles[i];
-        if (pA.type != ParticleType::Fluid) continue;
+        if (particles.type[i] != ParticleType::Fluid) continue;
+
+        int start = neighborList.begin[i];
+        int end = neighborList.end[i];
+
+        float rhoA = std::max(particles.density[i], 0.001f);
+        float pressA = particles.pressure[i];
 
         Vec2f fPressure(0.0f, 0.0f);
         Vec2f fViscosity(0.0f, 0.0f);
 
-        spatialHash.query(pA.position, h, positions, m_neighbors);
+        for (int k = start; k < end; ++k) {
+            int j = neighborList.data[k];
+            if (j == i) continue;
 
-        for (int jIdx : m_neighbors) {
-            if (jIdx == i) continue;
+            Vec2f rVec(particles.posX[j] - particles.posX[i], particles.posY[j] - particles.posY[i]);
+            float rSq = rVec.lengthSquared();
 
-            const Particle& pB = particles[jIdx];
-            if (pB.type != ParticleType::Fluid) continue;
+            if (rSq < hSq) {
+                float r = std::sqrt(rSq);
+                if (r <= 1e-5f) {
+                    float angle = (i + j) * 0.1f;
+                    rVec = Vec2f(std::cos(angle), std::sin(angle)) * 0.01f;
+                    r = 0.01f;
+                }
 
-            Vec2f rVec = pB.position - pA.position;
-            float r = rVec.length();
-
-            if (r < h && r > 0.0f) {
-                // A. 压力梯度力项 (使用 Spiky 核函数防聚集)
+                // A. 压力梯度力项 (使用 Spiky 核函数的梯度)
                 float diff = h - r;
                 Vec2f gradW = (spikyCoeff * diff * diff) * (rVec / r);
-                fPressure += -mass * ((pA.pressure + pB.pressure) / (2.0f * pB.density)) * gradW;
+                
+                float rhoB = std::max(particles.density[j], 0.001f);
+                float pressureTerm = (pressA / (rhoA * rhoA)) + (particles.pressure[j] / (rhoB * rhoB));
+                fPressure += -mass * mass * pressureTerm * gradW;
 
                 // B. 粘性切应力项 (使用 Viscosity 核函数)
-                float lapW = viscCoeff * (h - r);
-                fViscosity += viscosity * mass * ((pB.velocity - pA.velocity) / pB.density) * lapW;
+                float lapW = viscCoeff * diff;
+                Vec2f vDiff(particles.velX[j] - particles.velX[i], particles.velY[j] - particles.velY[i]);
+                fViscosity += viscosity * mass * (vDiff / rhoB) * lapW;
             }
         }
 
-        // 累加流体力学合力到粒子
-        pA.force += fPressure + fViscosity;
-    }
-}
+        Vec2f fluidForce = fPressure + fViscosity;
+        float forceSq = fluidForce.lengthSquared();
+        if (forceSq > maxFluidForce * maxFluidForce) {
+            fluidForce = fluidForce.normalized() * maxFluidForce;
+        }
 
-void SPHSolver::updateSPH(std::vector<Particle>& particles, 
-                         const SpatialHash& spatialHash, 
-                         const PhysicsConfig& config) {
-    // 兼容旧接口：内部构建 positions 向量
-    int pCount = static_cast<int>(particles.size());
-    std::vector<Vec2f> positions(pCount);
-    for (int i = 0; i < pCount; ++i) {
-        positions[i] = particles[i].position;
+        // 累加流体力学合力到粒子合力缓存中 (SoA 写入)
+        particles.forceX[i] += fluidForce.x;
+        particles.forceY[i] += fluidForce.y;
     }
-    updateSPH(particles, spatialHash, config, positions);
 }

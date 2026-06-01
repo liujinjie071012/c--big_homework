@@ -17,7 +17,7 @@ PhysicsWorld::PhysicsWorld()
 }
 
 void PhysicsWorld::addParticle(const Particle& p) {
-    m_particles.push_back(p);
+    m_particles.addParticle(p);
 }
 
 void PhysicsWorld::addEmitter(const Emitter& e) {
@@ -38,78 +38,182 @@ void PhysicsWorld::clear() {
     m_walls.clear();
     m_rigidBodies.clear();
     m_spatialHash.clear();
+    m_neighborCache.list.resize(0);
+    m_neighborCache.prevPosX.clear();
+    m_neighborCache.prevPosY.clear();
 }
 
 void PhysicsWorld::reset() {
     m_particles.clear();
     m_spatialHash.clear();
-    // 重置发射器的累加器
     for (auto& e : m_emitters) {
         e.accumulator = 0.0f;
     }
+    m_neighborCache.list.resize(0);
+    m_neighborCache.prevPosX.clear();
+    m_neighborCache.prevPosY.clear();
 }
 
 void PhysicsWorld::step() {
-    // 强制执行一个时间步
     update(config.timeStep);
 }
 
 void PhysicsWorld::update(float dt) {
-    // 使用子步积分提升碰撞与约束求解的物理稳定性
-    float sdt = dt / static_cast<float>(config.substeps);
-    for (int step = 0; step < config.substeps; ++step) {
+    // 【极致优化四】CFL 条件自适应子步步长调节 (从 5 ➔ 2~5 自动变档)
+    int pCount = m_particles.count;
+    float maxSpeedSq = 0.0f;
+    for (int i = 0; i < pCount; ++i) {
+        float vSq = m_particles.velX[i] * m_particles.velX[i] + m_particles.velY[i] * m_particles.velY[i];
+        if (vSq > maxSpeedSq) {
+            maxSpeedSq = vSq;
+        }
+    }
+    float soundSpeed = 300.0f; // 声速项
+    float vmax = std::sqrt(maxSpeedSq) + soundSpeed;
+
+    const float CFL_COEFF = 0.4f;
+    float h = config.fluidRadius;
+    float dtMax = CFL_COEFF * h / (vmax + 1e-6f);
+    
+    int substeps = static_cast<int>(std::ceil(dt / dtMax));
+    substeps = std::clamp(substeps, 2, 5); // 限制在 2 步到 5 步之间以保底稳定度
+    
+    float sdt = dt / static_cast<float>(substeps);
+    for (int step = 0; step < substeps; ++step) {
         substep(sdt);
     }
 }
 
 void PhysicsWorld::substep(float sdt) {
-    // 1. 发发射器喷出新粒子
+    // 1. 发射器喷出新粒子
     emitParticles(sdt);
 
-    // 2. 累加外力（如重力、阻力）
+    // 2. Velocity Verlet 阶段1
+    integrateStep1(sdt);
+
+    // 3. 累加外力（如重力、阻力）
     applyForces(sdt);
 
-    // 3. 构建空间哈希网格，并更新 SPH 流体压力与受力
-    int pCount = static_cast<int>(m_particles.size());
-    if (pCount > 0) {
-        m_positionsCache.resize(pCount);
+    // 【极致优化三】邻域跨子步缓存复用校验 (判断位移量是否超出 0.3h 重建阈值)
+    int pCount = m_particles.count;
+    bool forceRebuild = false;
+    if (m_neighborCache.prevPosX.size() != static_cast<size_t>(pCount)) {
+        forceRebuild = true;
+    } else {
+        float maxDispSq = 0.0f;
+        float h = config.fluidRadius;
+        float threshold = 0.09f * h * h; // 位移平方 > 0.09h² (即位移 > 0.3h)
+        
+        #pragma omp parallel for reduction(max:maxDispSq) schedule(static, 128)
         for (int i = 0; i < pCount; ++i) {
-            m_positionsCache[i] = m_particles[i].position;
+            float dx = m_particles.posX[i] - m_neighborCache.prevPosX[i];
+            float dy = m_particles.posY[i] - m_neighborCache.prevPosY[i];
+            float d2 = dx*dx + dy*dy;
+            if (d2 > maxDispSq) {
+                maxDispSq = d2;
+            }
         }
-        m_spatialHash.build(m_positionsCache);
-        m_sphSolver.updateSPH(m_particles, m_spatialHash, config, m_positionsCache);
+        if (maxDispSq > threshold) {
+            forceRebuild = true;
+        }
     }
 
-    // 4. 数值积分（先更新速度，便于计算碰撞速度）
-    integrate(sdt);
+    if (forceRebuild || m_neighborCache.needsRebuild()) {
+        m_spatialHash.build(m_particles.posX.data(), m_particles.posY.data(), pCount);
+        buildNeighborLists();
+        m_neighborCache.markRebuilt();
+    } else {
+        m_neighborCache.age();
+    }
+
+    // 4. 计算 SPH 流体压力与合力
+    m_sphSolver.updateSPH(m_particles, m_neighborCache.list, config);
+
+    // 4.5. Velocity Verlet 阶段2
+    integrateStep2(sdt);
 
     // 5. 碰撞检测与求解响应
     resolveCollisions();
+}
+
+void PhysicsWorld::buildNeighborLists() {
+    int pCount = m_particles.count;
+    m_neighborCache.list.resize(pCount);
+    
+    // 【极致优化三】多线程无锁 CSR 快速平铺构建：
+    // 通过前缀和计算每个粒子的邻居数量，消除线程竞争与 Dynamic 堆分配
+    std::vector<std::vector<int>> tempNbrs(pCount);
+    float h = config.fluidRadius;
+    
+    #pragma omp parallel
+    {
+        std::vector<int> localNbrs;
+        localNbrs.reserve(64);
+        
+        #pragma omp for schedule(static, 128)
+        for (int i = 0; i < pCount; ++i) {
+            if (m_particles.type[i] != ParticleType::Fluid) continue;
+            
+            Vec2f pos(m_particles.posX[i], m_particles.posY[i]);
+            // 过滤：邻域内只收集 Fluid 粒子作为其邻居，让 SIMD 内部循环不需要任何分支过滤
+            m_spatialHash.query(pos, h, m_particles.posX.data(), m_particles.posY.data(), localNbrs);
+            
+            std::vector<int> fluidNbrs;
+            fluidNbrs.reserve(localNbrs.size());
+            for (int idx : localNbrs) {
+                if (m_particles.type[idx] == ParticleType::Fluid) {
+                    fluidNbrs.push_back(idx);
+                }
+            }
+            tempNbrs[i] = std::move(fluidNbrs);
+        }
+    }
+    
+    // 计算前缀和前驱索引偏移
+    int totalNbrs = 0;
+    for (int i = 0; i < pCount; ++i) {
+        m_neighborCache.list.begin[i] = totalNbrs;
+        totalNbrs += tempNbrs[i].size();
+        m_neighborCache.list.end[i] = totalNbrs;
+    }
+    
+    m_neighborCache.list.data.resize(totalNbrs);
+    
+    // 多线程无冲突填充平铺一维数组
+    #pragma omp parallel for schedule(static, 128)
+    for (int i = 0; i < pCount; ++i) {
+        int start = m_neighborCache.list.begin[i];
+        int size = tempNbrs[i].size();
+        for (int j = 0; j < size; ++j) {
+            m_neighborCache.list.data[start + j] = tempNbrs[i][j];
+        }
+    }
+    
+    // 同步记录此时的位置
+    m_neighborCache.prevPosX = m_particles.posX;
+    m_neighborCache.prevPosY = m_particles.posY;
 }
 
 void PhysicsWorld::emitParticles(float sdt) {
     for (auto& emitter : m_emitters) {
         int count = emitter.update(sdt);
         for (int i = 0; i < count; ++i) {
-            // 在发射方向上加入随机扩散角
             float spawnAngle = emitter.angle + randomFloat(-emitter.spread * 0.5f, emitter.spread * 0.5f);
             Vec2f dir(std::cos(spawnAngle), std::sin(spawnAngle));
             
-            // 喷射初始速度与微小位置抖动防止重叠
             Vec2f vel = dir * emitter.speed;
             Vec2f posOffset = dir * emitter.particleRadius * 1.5f + Vec2f(randomFloat(-1.0f, 1.0f), randomFloat(-1.0f, 1.0f));
             Vec2f spawnPos = emitter.position + posOffset;
 
             // 限制粒子总数，防止爆发式溢出 (粒子上限设为 8000)
-            if (m_particles.size() >= 8000) {
-                // 移除最早产生的粒子以形成循环流体/粒子效果
-                m_particles.erase(m_particles.begin());
+            if (m_particles.count >= 8000) {
+                m_particles.erase(0);
             }
 
             if (emitter.type == EmitterType::NormalParticle) {
-                m_particles.emplace_back(spawnPos, vel, 1.0f, emitter.particleRadius, false, ParticleType::Normal);
+                m_particles.addParticle(spawnPos, vel, 1.0f, emitter.particleRadius, false, ParticleType::Normal);
             } else if (emitter.type == EmitterType::SPHFluid) {
-                m_particles.emplace_back(spawnPos, vel, config.fluidMass, emitter.particleRadius, false, ParticleType::Fluid);
+                m_particles.addParticle(spawnPos, vel, config.fluidMass, emitter.particleRadius, false, ParticleType::Fluid);
             }
         }
     }
@@ -117,256 +221,380 @@ void PhysicsWorld::emitParticles(float sdt) {
 
 void PhysicsWorld::applyForces(float sdt) {
     // A. 施加于粒子系统
-    for (auto& p : m_particles) {
-        if (p.isStatic) continue;
-        p.force += config.gravity * p.mass;
-        p.force -= p.velocity * 0.15f * p.mass; // 微弱阻力
+    int pCount = m_particles.count;
+    #pragma omp parallel for schedule(static, 128)
+    for (int i = 0; i < pCount; ++i) {
+        if (m_particles.isStatic[i]) continue;
+        m_particles.forceX[i] += config.gravity.x * m_particles.mass[i];
+        m_particles.forceY[i] += config.gravity.y * m_particles.mass[i];
+        
+        // 微弱空气阻尼
+        m_particles.forceX[i] -= m_particles.velX[i] * 0.28f * m_particles.mass[i];
+        m_particles.forceY[i] -= m_particles.velY[i] * 0.28f * m_particles.mass[i];
     }
 
     // B. 施加于刚体系统
     for (auto& b : m_rigidBodies) {
         if (b.type == BodyType::Static) continue;
         b.force += config.gravity * b.mass;
-        // 施加平动与转动微弱空气阻尼
         b.force -= b.velocity * 0.1f * b.mass;
         b.torque -= b.angularVelocity * 0.1f * b.inertia;
     }
 }
 
-void PhysicsWorld::integrate(float sdt) {
-    // A. 积分粒子系统
-    for (auto& p : m_particles) {
-        if (p.isStatic) continue;
-        p.velocity += (p.force / p.mass) * sdt;
-
-        // 限制粒子最大速度，防止高压下速度爆炸导致穿墙
-        float maxSpeed = 1500.0f;
-        if (p.velocity.lengthSquared() > maxSpeed * maxSpeed) {
-            p.velocity = p.velocity.normalized() * maxSpeed;
+void PhysicsWorld::integrateStep1(float sdt) {
+    // A. 粒子 Velocity Verlet Step 1 (SoA 适配)
+    int pCount = m_particles.count;
+    #pragma omp parallel for schedule(static, 128)
+    for (int i = 0; i < pCount; ++i) {
+        if (m_particles.isStatic[i]) continue;
+        
+        m_particles.oldPosX[i] = m_particles.posX[i];
+        m_particles.oldPosY[i] = m_particles.posY[i];
+        
+        // 安全速度钳制
+        float maxSpeed = 900.0f;
+        float vSq = m_particles.velX[i]*m_particles.velX[i] + m_particles.velY[i]*m_particles.velY[i];
+        if (vSq > maxSpeed * maxSpeed) {
+            float len = std::sqrt(vSq);
+            m_particles.velX[i] = (m_particles.velX[i] / len) * maxSpeed;
+            m_particles.velY[i] = (m_particles.velY[i] / len) * maxSpeed;
         }
+        
+        float accX = m_particles.forceX[i] / m_particles.mass[i];
+        float accY = m_particles.forceY[i] / m_particles.mass[i];
+        
+        m_particles.posX[i] += m_particles.velX[i] * sdt + accX * (0.5f * sdt * sdt);
+        m_particles.posY[i] += m_particles.velY[i] * sdt + accY * (0.5f * sdt * sdt);
+        
+        m_particles.velX[i] += accX * (0.5f * sdt);
+        m_particles.velY[i] += accY * (0.5f * sdt);
 
-        p.position += p.velocity * sdt;
-        p.force = Vec2f(0.0f, 0.0f);
+        // 位移安全阀
+        float dispX = m_particles.posX[i] - m_particles.oldPosX[i];
+        float dispY = m_particles.posY[i] - m_particles.oldPosY[i];
+        float dispSq = dispX*dispX + dispY*dispY;
+        float maxDisplacement = m_particles.radius[i] * 2.0f;
+        if (dispSq > maxDisplacement * maxDisplacement) {
+            float len = std::sqrt(dispSq);
+            m_particles.posX[i] = m_particles.oldPosX[i] + (dispX / len) * maxDisplacement;
+            m_particles.posY[i] = m_particles.oldPosY[i] + (dispY / len) * maxDisplacement;
+        }
+        
+        m_particles.forceX[i] = 0.0f;
+        m_particles.forceY[i] = 0.0f;
     }
 
-    // B. 积分刚体系统
+    // B. 刚体 Velocity Verlet Step 1 (未变)
     for (auto& b : m_rigidBodies) {
         if (b.type == BodyType::Static) continue;
         
-        // 辛欧拉平动积分
-        b.velocity += (b.force * b.invMass) * sdt;
-        
-        // 限制最大平动速度，防止在高压挤压下速度爆炸导致穿模
-        float maxSpeed = 2000.0f; 
-        if (b.velocity.lengthSquared() > maxSpeed * maxSpeed) {
-            b.velocity = b.velocity.normalized() * maxSpeed;
-        }
+        Vec2f acc = b.force * b.invMass;
+        float angAcc = b.torque * b.invInertia;
 
-        b.position += b.velocity * sdt;
+        b.position += b.velocity * sdt + acc * (0.5f * sdt * sdt);
+        b.velocity += acc * (0.5f * sdt);
 
-        // 辛欧拉转动积分
-        b.angularVelocity += (b.torque * b.invInertia) * sdt;
-        
-        // 限制最大角速度
-        float maxAngular = 50.0f;
-        if (std::abs(b.angularVelocity) > maxAngular) {
-            b.angularVelocity = (b.angularVelocity > 0.0f) ? maxAngular : -maxAngular;
-        }
+        b.angle += b.angularVelocity * sdt + angAcc * (0.5f * sdt * sdt);
+        b.angularVelocity += angAcc * (0.5f * sdt);
 
-        b.angle += b.angularVelocity * sdt;
-
-        // 重新缓存刚体的世界顶点坐标数据
         b.updateGlobalVertices();
         b.clearForces();
     }
 }
 
-void PhysicsWorld::resolveBoundaryCollisions(Particle& p) {
-    float r = p.radius;
-    float e = config.boundaryDamping;
+void PhysicsWorld::integrateStep2(float sdt) {
+    // A. 粒子 Velocity Verlet Step 2
+    int pCount = m_particles.count;
+    #pragma omp parallel for schedule(static, 128)
+    for (int i = 0; i < pCount; ++i) {
+        if (m_particles.isStatic[i]) continue;
+        
+        float accX = m_particles.forceX[i] / m_particles.mass[i];
+        float accY = m_particles.forceY[i] / m_particles.mass[i];
+        m_particles.velX[i] += accX * (0.5f * sdt);
+        m_particles.velY[i] += accY * (0.5f * sdt);
 
-    // 左边界
-    if (p.position.x - r < 0.0f) {
-        p.position.x = r;
-        p.velocity.x = -p.velocity.x * e;
-    }
-    // 右边界
-    else if (p.position.x + r > config.worldWidth) {
-        p.position.x = config.worldWidth - r;
-        p.velocity.x = -p.velocity.x * e;
+        float maxSpeed = 900.0f;
+        float vSq = m_particles.velX[i]*m_particles.velX[i] + m_particles.velY[i]*m_particles.velY[i];
+        if (vSq > maxSpeed * maxSpeed) {
+            float len = std::sqrt(vSq);
+            m_particles.velX[i] = (m_particles.velX[i] / len) * maxSpeed;
+            m_particles.velY[i] = (m_particles.velY[i] / len) * maxSpeed;
+        }
     }
 
-    // 上边界
-    if (p.position.y - r < 0.0f) {
-        p.position.y = r;
-        p.velocity.y = -p.velocity.y * e;
-    }
-    // 下边界 (底座)
-    else if (p.position.y + r > config.worldHeight) {
-        p.position.y = config.worldHeight - r;
-        p.velocity.y = -p.velocity.y * e;
-        // 增加摩擦力使球能在地上滚停下来
-        p.velocity.x *= 0.95f; 
+    // B. 刚体 Velocity Verlet Step 2 (未变)
+    for (auto& b : m_rigidBodies) {
+        if (b.type == BodyType::Static) continue;
+        
+        Vec2f acc = b.force * b.invMass;
+        float angAcc = b.torque * b.invInertia;
+
+        b.velocity += acc * (0.5f * sdt);
+        b.angularVelocity += angAcc * (0.5f * sdt);
+
+        float maxSpeed = 2000.0f; 
+        if (b.velocity.lengthSquared() > maxSpeed * maxSpeed) {
+            b.velocity = b.velocity.normalized() * maxSpeed;
+        }
+
+        float maxAngular = 50.0f;
+        if (std::abs(b.angularVelocity) > maxAngular) {
+            b.angularVelocity = (b.angularVelocity > 0.0f) ? maxAngular : -maxAngular;
+        }
     }
 }
 
-void PhysicsWorld::resolveWallCollisions(Particle& p) {
-    if (p.isStatic) return;
+void PhysicsWorld::resolveBoundaryCollisions(int i) {
+    float r = m_particles.radius[i];
+    float e = config.boundaryDamping;
+
+    // 左边界
+    if (m_particles.posX[i] - r < 0.0f) {
+        m_particles.posX[i] = r;
+        m_particles.velX[i] = -m_particles.velX[i] * e;
+    }
+    // 右边界
+    else if (m_particles.posX[i] + r > config.worldWidth) {
+        m_particles.posX[i] = config.worldWidth - r;
+        m_particles.velX[i] = -m_particles.velX[i] * e;
+    }
+
+    // 上边界
+    if (m_particles.posY[i] - r < 0.0f) {
+        m_particles.posY[i] = r;
+        m_particles.velY[i] = -m_particles.velY[i] * e;
+    }
+    // 下边界
+    else if (m_particles.posY[i] + r > config.worldHeight) {
+        m_particles.posY[i] = config.worldHeight - r;
+        m_particles.velY[i] = -m_particles.velY[i] * e;
+        
+        float frictionFactor = (m_particles.type[i] == ParticleType::Fluid) ? 0.998f : 0.95f;
+        m_particles.velX[i] *= frictionFactor; 
+    }
+}
+
+void PhysicsWorld::resolveWallCollisions(int i) {
+    if (m_particles.isStatic[i]) return;
+
+    float px = m_particles.posX[i];
+    float py = m_particles.posY[i];
+    float r = m_particles.radius[i];
 
     for (const auto& wall : m_walls) {
-        Vec2f ab = wall.end - wall.start;
-        Vec2f ap = p.position - wall.start;
+        // AABB Culling
+        if (px < wall.minBound.x - r || px > wall.maxBound.x + r ||
+            py < wall.minBound.y - r || py > wall.maxBound.y + r) {
+            continue;
+        }
 
+        Vec2f ab = wall.end - wall.start;
+        
+        // 1. CCD (仅对非流体粒子进行，流体粒子有速度限值且子步极短，免去叉乘几何开销)
+        if (m_particles.type[i] != ParticleType::Fluid) {
+            float trajX = px - m_particles.oldPosX[i];
+            float trajY = py - m_particles.oldPosY[i];
+            float cross_traj_ab = trajX * ab.y - trajY * ab.x;
+            
+            if (std::abs(cross_traj_ab) > 1e-5f) {
+                float diffX = wall.start.x - m_particles.oldPosX[i];
+                float diffY = wall.start.y - m_particles.oldPosY[i];
+                
+                float t = (diffX * ab.y - diffY * ab.x) / cross_traj_ab;
+                float u = (diffX * trajY - diffY * trajX) / cross_traj_ab;
+                
+                if (t > 0.0f && t <= 1.0f && u >= 0.0f && u <= 1.0f) {
+                    float interX = m_particles.oldPosX[i] + trajX * t;
+                    float interY = m_particles.oldPosY[i] + trajY * t;
+                    
+                    Vec2f wallNormal(-ab.y, ab.x);
+                    wallNormal.normalize();
+                    
+                    if (trajX * wallNormal.x + trajY * wallNormal.y > 0.0f) {
+                        wallNormal = -wallNormal;
+                    }
+                    
+                    m_particles.posX[i] = interX + wallNormal.x * (r + 0.1f);
+                    m_particles.posY[i] = interY + wallNormal.y * (r + 0.1f);
+                    
+                    float vNormal = m_particles.velX[i] * wallNormal.x + m_particles.velY[i] * wallNormal.y;
+                    float elasticity = config.particleElasticity;
+                    Vec2f tangent(-wallNormal.y, wallNormal.x);
+                    float vTangent = m_particles.velX[i] * tangent.x + m_particles.velY[i] * tangent.y;
+                    float frictionFactor = (m_particles.type[i] == ParticleType::Fluid) ? 0.998f : 0.95f;
+                    
+                    m_particles.velX[i] = tangent.x * vTangent * frictionFactor - wallNormal.x * vNormal * elasticity;
+                    m_particles.velY[i] = tangent.y * vTangent * frictionFactor - wallNormal.y * vNormal * elasticity;
+                    continue;
+                }
+            }
+        }
+        
+        // 2. DCD
+        float apX = px - wall.start.x;
+        float apY = py - wall.start.y;
         float abLenSq = ab.lengthSquared();
         if (abLenSq == 0.0f) continue;
 
-        // 投影求最近点系数 t
-        float t = std::max(0.0f, std::min(1.0f, ap.dot(ab) / abLenSq));
+        float t = std::max(0.0f, std::min(1.0f, (apX * ab.x + apY * ab.y) / abLenSq));
+        float closestX = wall.start.x + ab.x * t;
+        float closestY = wall.start.y + ab.y * t;
+        
+        float diffX = px - closestX;
+        float diffY = py - closestY;
+        float distSq = diffX*diffX + diffY*diffY;
 
-        Vec2f closest = wall.start + ab * t;
-        Vec2f diff = p.position - closest;
-        float distSq = diff.lengthSquared();
-
-        // 放弃单面的 SDF 检测，恢复为双面纯距离检测。
-        // 因为我们已经加入了 Velocity Clamping（最大单步位移被限制在 6 像素），
-        // 且半径为 3 像素，所以粒子不可能在单步内完全跨越墙体，
-        // 纯距离检测不仅完全安全，而且能完美支持双面碰撞，绝不会产生“黑洞吸附”现象。
-        if (distSq > 0.0001f && distSq < p.radius * p.radius) {
+        if (distSq > 0.0001f && distSq < r * r) {
             float dist = std::sqrt(distSq);
-            Vec2f normal = diff / dist;
-            float penetration = p.radius - dist;
+            float normalX = diffX / dist;
+            float normalY = diffY / dist;
+            float penetration = r - dist;
 
-            // 1. 位置纠正（强制推出）
-            p.position += normal * penetration;
+            m_particles.posX[i] += normalX * penetration;
+            m_particles.posY[i] += normalY * penetration;
 
-            // 2. 速度反射
-            float vNormal = p.velocity.dot(normal);
+            float vNormal = m_particles.velX[i] * normalX + m_particles.velY[i] * normalY;
             if (vNormal < 0.0f) {
                 float elasticity = config.particleElasticity;
-                Vec2f tangent(-normal.y, normal.x);
-                float vTangent = p.velocity.dot(tangent);
-                p.velocity = tangent * vTangent * 0.95f - normal * vNormal * elasticity;
+                Vec2f tangent(-normalY, normalX);
+                float vTangent = m_particles.velX[i] * tangent.x + m_particles.velY[i] * tangent.y;
+                float frictionFactor = (m_particles.type[i] == ParticleType::Fluid) ? 0.998f : 0.95f;
+                m_particles.velX[i] = tangent.x * vTangent * frictionFactor - normalX * vNormal * elasticity;
+                m_particles.velY[i] = tangent.y * vTangent * frictionFactor - normalY * vNormal * elasticity;
             }
         }
     }
 }
 
 void PhysicsWorld::resolveCollisions() {
-    int pCount = static_cast<int>(m_particles.size());
+    int pCount = m_particles.count;
     int rbCount = static_cast<int>(m_rigidBodies.size());
 
-    // ==========================================
-    // 1. 粒子-粒子自碰撞解算 (利用空间哈希网格加速)
-    // ==========================================
+    // 1. 粒子-粒子自碰撞 (仅针对非双流体对，利用空间网格加速)
     if (pCount > 0) {
-        // 重用缓存的位置向量，用积分后的新位置重建空间哈希
-        m_positionsCache.resize(pCount);
-        for (int i = 0; i < pCount; ++i) {
-            m_positionsCache[i] = m_particles[i].position;
-        }
-        m_spatialHash.build(m_positionsCache);
-
         std::vector<int> neighbors;
+        neighbors.reserve(64);
+        
+        const float* posX = m_particles.posX.data();
+        const float* posY = m_particles.posY.data();
+        
         for (int i = 0; i < pCount; ++i) {
-            Particle& pA = m_particles[i];
-            float searchRadius = pA.radius * 2.5f;
-            m_spatialHash.query(pA.position, searchRadius, m_positionsCache, neighbors);
+            float px = m_particles.posX[i];
+            float py = m_particles.posY[i];
+            float pr = m_particles.radius[i];
+            ParticleType typeA = m_particles.type[i];
+            
+            float searchRadius = pr * 2.5f;
+            Vec2f pPos(px, py);
+            
+            m_spatialHash.query(pPos, searchRadius, posX, posY, neighbors);
 
             for (int jIdx : neighbors) {
                 if (jIdx <= i) continue;
 
-                Particle& pB = m_particles[jIdx];
+                // 【核心修复】流体粒子之间纯靠 SPH 压力排斥，严禁引入硬碰撞叠加修正！
+                if (typeA == ParticleType::Fluid && m_particles.type[jIdx] == ParticleType::Fluid) {
+                    continue;
+                }
                 
-                float dist = pA.position.distance(pB.position);
-                float minDist = pA.radius + pB.radius;
+                float dx = m_particles.posX[jIdx] - px;
+                float dy = m_particles.posY[jIdx] - py;
+                float distSq = dx*dx + dy*dy;
+                float minDist = pr + m_particles.radius[jIdx];
 
-                if (dist < minDist) {
+                if (distSq < minDist * minDist) {
+                    float dist = std::sqrt(distSq);
                     Vec2f normal(0.0f, -1.0f);
                     if (dist > 0.0f) {
-                        normal = (pB.position - pA.position) / dist;
+                        normal = Vec2f(dx / dist, dy / dist);
                     }
                     float penetration = minDist - dist;
 
-                    // 位置修正防止粘连沉降
-                    float massRatioA = pA.isStatic ? 0.0f : (pB.isStatic ? 1.0f : 0.5f);
-                    float massRatioB = pB.isStatic ? 0.0f : (pA.isStatic ? 1.0f : 0.5f);
+                    float massRatioA = m_particles.isStatic[i] ? 0.0f : (m_particles.isStatic[jIdx] ? 1.0f : 0.5f);
+                    float massRatioB = m_particles.isStatic[jIdx] ? 0.0f : (m_particles.isStatic[i] ? 1.0f : 0.5f);
 
-                    pA.position -= normal * penetration * massRatioA;
-                    pB.position += normal * penetration * massRatioB;
+                    m_particles.posX[i] -= normal.x * penetration * massRatioA;
+                    m_particles.posY[i] -= normal.y * penetration * massRatioA;
+                    m_particles.posX[jIdx] += normal.x * penetration * massRatioB;
+                    m_particles.posY[jIdx] += normal.y * penetration * massRatioB;
 
-                    // 冲量弹性反弹
-                    Vec2f relativeVel = pB.velocity - pA.velocity;
-                    float vNormal = relativeVel.dot(normal);
+                    float relativeVelX = m_particles.velX[jIdx] - m_particles.velX[i];
+                    float relativeVelY = m_particles.velY[jIdx] - m_particles.velY[i];
+                    float vNormal = relativeVelX * normal.x + relativeVelY * normal.y;
 
                     if (vNormal < 0.0f) {
-                        float elasticity = std::min(config.particleElasticity, config.particleElasticity);
-                        float invMassSum = (pA.isStatic ? 0.0f : 1.0f / pA.mass) + 
-                                           (pB.isStatic ? 0.0f : 1.0f / pB.mass);
+                        float elasticity = config.particleElasticity;
+                        float invMassSum = (m_particles.isStatic[i] ? 0.0f : 1.0f / m_particles.mass[i]) + 
+                                           (m_particles.isStatic[jIdx] ? 0.0f : 1.0f / m_particles.mass[jIdx]);
                         if (invMassSum > 0.0f) {
                             float impulseScalar = -(1.0f + elasticity) * vNormal / invMassSum;
-                            Vec2f impulse = normal * impulseScalar;
-
-                            if (!pA.isStatic) pA.velocity -= impulse / pA.mass;
-                            if (!pB.isStatic) pB.velocity += impulse / pB.mass;
+                            
+                            if (!m_particles.isStatic[i]) {
+                                m_particles.velX[i] -= normal.x * impulseScalar / m_particles.mass[i];
+                                m_particles.velY[i] -= normal.y * impulseScalar / m_particles.mass[i];
+                            }
+                            if (!m_particles.isStatic[jIdx]) {
+                                m_particles.velX[jIdx] += normal.x * impulseScalar / m_particles.mass[jIdx];
+                                m_particles.velY[jIdx] += normal.y * impulseScalar / m_particles.mass[jIdx];
+                            }
                         }
                     }
                 }
             }
 
-            // 粒子与边界及静态墙体的碰撞解算
-            resolveBoundaryCollisions(pA);
-            resolveWallCollisions(pA);
+            resolveBoundaryCollisions(i);
+            resolveWallCollisions(i);
         }
     }
 
-    // ==========================================
     // 2. 粒子-刚体碰撞解算 (水流冲刷/阻挡刚体)
-    // ==========================================
     if (pCount > 0 && rbCount > 0) {
         resolveParticleRigidCollisions();
     }
 
-    // ==========================================
-    // 2.5 粒子-墙体/边界 二次加固校验 (Post-Pass)
-    //     粒子-粒子 和 粒子-刚体 碰撞解算可能把粒子推穿墙壁，
-    //     这里做两轮强制位置夹紧，防止高密度下穿透。
-    // ==========================================
+    // 2.5 粒子二次加固校验 (防止穿透)
     if (pCount > 0) {
         for (int pass = 0; pass < 2; ++pass) {
+            #pragma omp parallel for schedule(static, 128)
             for (int i = 0; i < pCount; ++i) {
-                Particle& p = m_particles[i];
-                if (p.isStatic) continue;
-                resolveBoundaryCollisions(p);
-                resolveWallCollisions(p);
+                if (m_particles.isStatic[i]) continue;
+                resolveBoundaryCollisions(i);
+                resolveWallCollisions(i);
+            }
+        }
+        
+        #pragma omp parallel for schedule(static, 128)
+        for (int i = 0; i < pCount; ++i) {
+            if (m_particles.isStatic[i]) continue;
+            float maxSpeed = 900.0f;
+            float vSq = m_particles.velX[i]*m_particles.velX[i] + m_particles.velY[i]*m_particles.velY[i];
+            if (vSq > maxSpeed * maxSpeed) {
+                float len = std::sqrt(vSq);
+                m_particles.velX[i] = (m_particles.velX[i] / len) * maxSpeed;
+                m_particles.velY[i] = (m_particles.velY[i] / len) * maxSpeed;
             }
         }
     }
 
-    // ==========================================
     // 3. 刚体-刚体碰撞检测与求解 (SAT 分离轴定理与冲量求解器)
-    // ==========================================
     for (int i = 0; i < rbCount; ++i) {
         for (int j = i + 1; j < rbCount; ++j) {
             ContactManifold manifold;
             if (Collider::detectCollision(manifold, &m_rigidBodies[i], &m_rigidBodies[j])) {
-                // 求解反冲冲量与摩擦力
                 RigidBodySolver::resolveCollision(manifold, config);
-                // 位置投影修正，彻底规避刚体穿透
                 RigidBodySolver::positionCorrection(manifold, config);
             }
         }
     }
 
-    // ==========================================
     // 4. 刚体-边界碰撞解算
-    // ==========================================
     for (int i = 0; i < rbCount; ++i) {
         resolveRigidBoundaryCollisions(m_rigidBodies[i]);
     }
 
-    // ==========================================
-    // 5. 刚体-墙体碰撞解算 (用户绘制的墙壁线段)
-    // ==========================================
+    // 5. 刚体-墙体碰撞解算
     for (int i = 0; i < rbCount; ++i) {
         resolveRigidWallCollisions(m_rigidBodies[i]);
     }
@@ -444,104 +672,148 @@ void PhysicsWorld::resolveRigidBoundaryCollisions(RigidBody& b) {
 }
 
 void PhysicsWorld::resolveParticleRigidCollisions() {
-    for (auto& p : m_particles) {
-        if (p.isStatic) continue;
+    int pCount = m_particles.count;
+
+    // 【极致优化五】并行化碰撞受力收集，使用 atomic 写入刚体，实现完美的线程无锁
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int i = 0; i < pCount; ++i) {
+        if (m_particles.isStatic[i]) continue;
+        
+        float pX = m_particles.posX[i];
+        float pY = m_particles.posY[i];
+        float pR = m_particles.radius[i];
+        float pM = m_particles.mass[i];
 
         for (auto& b : m_rigidBodies) {
             if (b.shape == ShapeType::Circle) {
-                float dist = p.position.distance(b.position);
-                float minDist = p.radius + b.radius;
+                float diffX = pX - b.position.x;
+                float diffY = pY - b.position.y;
+                float distSq = diffX*diffX + diffY*diffY;
+                float minDist = pR + b.radius;
 
-                if (dist < minDist && dist > 0.0f) {
-                    Vec2f normal = (p.position - b.position) / dist;
+                if (distSq < minDist * minDist && distSq > 0.0f) {
+                    float dist = std::sqrt(distSq);
+                    float normalX = diffX / dist;
+                    float normalY = diffY / dist;
                     float penetration = minDist - dist;
 
-                    // 1. 位置纠正
-                    float invMassSum = 1.0f / p.mass + b.invMass;
-                    p.position += normal * penetration * (1.0f / p.mass / invMassSum);
+                    float invMassSum = 1.0f / pM + b.invMass;
+                    m_particles.posX[i] += normalX * penetration * (1.0f / pM / invMassSum);
+                    m_particles.posY[i] += normalY * penetration * (1.0f / pM / invMassSum);
+                    
                     if (b.type != BodyType::Static) {
-                        b.position -= normal * penetration * (b.invMass / invMassSum);
-                        b.updateGlobalVertices();
+                        float corrX = -normalX * penetration * (b.invMass / invMassSum);
+                        float corrY = -normalY * penetration * (b.invMass / invMassSum);
+                        #pragma omp atomic
+                        b.position.x += corrX;
+                        #pragma omp atomic
+                        b.position.y += corrY;
                     }
 
-                    // 2. 冲量碰撞响应
-                    Vec2f relativeVel = p.velocity - b.velocity;
-                    float vNormal = relativeVel.dot(normal);
+                    float relativeVelX = m_particles.velX[i] - b.velocity.x;
+                    float relativeVelY = m_particles.velY[i] - b.velocity.y;
+                    float vNormal = relativeVelX * normalX + relativeVelY * normalY;
 
                     if (vNormal < 0.0f) {
                         float elasticity = std::min(config.particleElasticity, b.restitution);
                         float j = -(1.0f + elasticity) * vNormal / invMassSum;
                         
-                        p.velocity += normal * j / p.mass;
+                        m_particles.velX[i] += normalX * j / pM;
+                        m_particles.velY[i] += normalY * j / pM;
+                        
                         if (b.type != BodyType::Static) {
-                            b.velocity -= normal * j * b.invMass;
+                            float dvx = -normalX * j * b.invMass;
+                            float dvy = -normalY * j * b.invMass;
+                            #pragma omp atomic
+                            b.velocity.x += dvx;
+                            #pragma omp atomic
+                            b.velocity.y += dvy;
                         }
                     }
                 }
             }
             else if (b.shape == ShapeType::Polygon) {
-                // 将粒子视为小圆，投影到多边形的各条边，找距离最近的接触线段
                 int count = static_cast<int>(b.globalVertices.size());
                 float minDistance = std::numeric_limits<float>::max();
                 Vec2f closestPoint;
                 Vec2f bestNormal;
 
-                for (int i = 0; i < count; ++i) {
-                    Vec2f v1 = b.globalVertices[i];
-                    Vec2f v2 = b.globalVertices[(i + 1) % count];
+                for (int j = 0; j < count; ++j) {
+                    Vec2f v1 = b.globalVertices[j];
+                    Vec2f v2 = b.globalVertices[(j + 1) % count];
                     Vec2f edge = v2 - v1;
-                    Vec2f ap = p.position - v1;
+                    float apX = pX - v1.x;
+                    float apY = pY - v1.y;
 
                     float edgeLenSq = edge.lengthSquared();
                     if (edgeLenSq == 0.0f) continue;
 
-                    float t = ap.dot(edge) / edgeLenSq;
+                    float t = (apX * edge.x + apY * edge.y) / edgeLenSq;
                     t = std::max(0.0f, std::min(1.0f, t));
 
                     Vec2f pt = v1 + edge * t;
-                    float dist = p.position.distance(pt);
+                    float dx = pX - pt.x;
+                    float dy = pY - pt.y;
+                    float dist = std::sqrt(dx*dx + dy*dy);
 
                     if (dist < minDistance) {
                         minDistance = dist;
                         closestPoint = pt;
-                        bestNormal = b.globalNormals[i]; // 多边形边法线
+                        bestNormal = b.globalNormals[j];
                     }
                 }
 
-                // 判断粒子中心是否处于多边形内部，如果在内部，强制用法线推出来
-                bool inside = Collider::isPointInPolygon(p.position, b);
+                Vec2f pPos(pX, pY);
+                bool inside = Collider::isPointInPolygon(pPos, b);
 
-                if (minDistance < p.radius || inside) {
+                if (minDistance < pR || inside) {
                     Vec2f normal = bestNormal;
                     if (inside) {
-                        // 在内部，穿透距离为多边形边缘到点距离加上粒子半径
                         minDistance = -minDistance; 
                     }
-                    float penetration = p.radius - minDistance;
+                    float penetration = pR - minDistance;
 
-                    // 1. 位置位置校正
-                    float invMassSum = 1.0f / p.mass + b.invMass;
-                    p.position += normal * penetration * (1.0f / p.mass / invMassSum);
+                    float invMassSum = 1.0f / pM + b.invMass;
+                    m_particles.posX[i] += normal.x * penetration * (1.0f / pM / invMassSum);
+                    m_particles.posY[i] += normal.y * penetration * (1.0f / pM / invMassSum);
+                    
                     if (b.type != BodyType::Static) {
-                        b.position -= normal * penetration * (b.invMass / invMassSum);
-                        b.updateGlobalVertices();
+                        float corrX = -normal.x * penetration * (b.invMass / invMassSum);
+                        float corrY = -normal.y * penetration * (b.invMass / invMassSum);
+                        #pragma omp atomic
+                        b.position.x += corrX;
+                        #pragma omp atomic
+                        b.position.y += corrY;
                     }
 
-                    // 2. 冲量碰撞反射
-                    Vec2f relativeVel = p.velocity - b.velocity;
-                    float vNormal = relativeVel.dot(normal);
+                    float relativeVelX = m_particles.velX[i] - b.velocity.x;
+                    float relativeVelY = m_particles.velY[i] - b.velocity.y;
+                    float vNormal = relativeVelX * normal.x + relativeVelY * normal.y;
 
                     if (vNormal < 0.0f) {
                         float elasticity = std::min(config.particleElasticity, b.restitution);
                         float j = -(1.0f + elasticity) * vNormal / invMassSum;
 
-                        p.velocity += normal * j / p.mass;
+                        m_particles.velX[i] += normal.x * j / pM;
+                        m_particles.velY[i] += normal.y * j / pM;
+                        
                         if (b.type != BodyType::Static) {
-                            b.velocity -= normal * j * b.invMass;
+                            float dvx = -normal.x * j * b.invMass;
+                            float dvy = -normal.y * j * b.invMass;
+                            #pragma omp atomic
+                            b.velocity.x += dvx;
+                            #pragma omp atomic
+                            b.velocity.y += dvy;
                         }
                     }
                 }
             }
+        }
+    }
+
+    for (auto& b : m_rigidBodies) {
+        if (b.type != BodyType::Static) {
+            b.updateGlobalVertices();
         }
     }
 }
@@ -553,8 +825,12 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
     float e = b.restitution;
 
     if (b.shape == ShapeType::Circle) {
-        // 圆形刚体 vs 墙壁线段 (支持深穿透检测)
         for (const auto& wall : m_walls) {
+            if (b.position.x < wall.minBound.x - b.radius || b.position.x > wall.maxBound.x + b.radius ||
+                b.position.y < wall.minBound.y - b.radius || b.position.y > wall.maxBound.y + b.radius) {
+                continue;
+            }
+
             Vec2f ab = wall.end - wall.start;
             float abLenSq = ab.lengthSquared();
             if (abLenSq == 0.0f) continue;
@@ -563,7 +839,6 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
             float wallLen = wallNormal.length();
             wallNormal = wallNormal / wallLen;
 
-            // 确保法线指向刚体所在方向
             if ((b.position - wall.start).dot(wallNormal) < 0.0f) {
                 wallNormal *= -1.0f;
             }
@@ -577,27 +852,20 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
             float signedDist = toCenter.dot(wallNormal);
             float dist = toCenter.length();
 
-            // 切向偏离（用于避免把平行于墙壁且很远的对象判定为碰撞）
             float tangentDistSq = std::max(0.0f, dist * dist - signedDist * signedDist);
 
-            // 发生浅穿透 或 深穿透 (无深度限制，只要在切向范围内即可)
             if (signedDist < b.radius && tangentDistSq < b.radius * b.radius) {
-                // 默认使用墙壁法线（特别是在深穿透时极其重要，避免法线翻转）
                 Vec2f normal = wallNormal;
                 float penetration = b.radius - signedDist;
 
-                // 如果是端点的浅穿透，使用真实的圆角法线
                 if (signedDist > 0.0f && dist > 0.0f && (t < 0.0f || t > 1.0f)) {
                     normal = toCenter / dist;
                     penetration = b.radius - dist;
-                    // 如果真正的端点距离大于半径，说明只是擦过延伸线，并未真正撞到端点
                     if (dist > b.radius) continue; 
                 }
 
-                // 位置纠正
                 b.position += normal * penetration;
 
-                // 速度反射与摩擦转动
                 Vec2f r = closest - b.position;
                 Vec2f vRel = b.velocity + Vec2f(-b.angularVelocity * r.y, b.angularVelocity * r.x);
                 float vNormal = vRel.dot(normal);
@@ -610,7 +878,6 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
                     Vec2f impulse = normal * j;
                     b.applyImpulse(impulse, r);
 
-                    // 摩擦力
                     vRel = b.velocity + Vec2f(-b.angularVelocity * r.y, b.angularVelocity * r.x);
                     Vec2f tangent(-normal.y, normal.x);
                     float vTangent = vRel.dot(tangent);
@@ -627,10 +894,23 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
         }
     }
     else if (b.shape == ShapeType::Polygon) {
-        // 多边形刚体 vs 墙壁线段：逐顶点深穿透检测
         b.updateGlobalVertices();
 
+        float polyMinX = b.globalVertices[0].x, polyMaxX = b.globalVertices[0].x;
+        float polyMinY = b.globalVertices[0].y, polyMaxY = b.globalVertices[0].y;
+        for (const auto& v : b.globalVertices) {
+            if (v.x < polyMinX) polyMinX = v.x;
+            if (v.x > polyMaxX) polyMaxX = v.x;
+            if (v.y < polyMinY) polyMinY = v.y;
+            if (v.y > polyMaxY) polyMaxY = v.y;
+        }
+
         for (const auto& wall : m_walls) {
+            if (polyMaxX < wall.minBound.x || polyMinX > wall.maxBound.x ||
+                polyMaxY < wall.minBound.y || polyMinY > wall.maxBound.y) {
+                continue;
+            }
+
             Vec2f ab = wall.end - wall.start;
             float abLenSq = ab.lengthSquared();
             if (abLenSq == 0.0f) continue;
@@ -662,7 +942,6 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
 
                 float tangentDistSq = std::max(0.0f, dist * dist - signedDist * signedDist);
 
-                // 渗透阈值：移除深穿透限制，允许高压下的无限深穿透纠正，只要切向偏离不离谱（<20像素）即可
                 float threshold = 2.0f; 
                 if (signedDist < threshold && tangentDistSq < 400.0f) {
                     float penetration = threshold - signedDist;
@@ -670,17 +949,15 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
                     collisionCount++;
                     if (penetration > maxPenetration) {
                         maxPenetration = penetration;
-                        bestContact = v; // 用该穿透最深的顶点作为施加力的接触点
+                        bestContact = v; 
                     }
                 }
             }
 
             if (collisionCount > 0) {
-                // 位置纠正
                 b.position += totalCorrection / static_cast<float>(collisionCount);
                 b.updateGlobalVertices();
 
-                // 速度反射与摩擦转动
                 Vec2f r = bestContact - b.position;
                 Vec2f vRel = b.velocity + Vec2f(-b.angularVelocity * r.y, b.angularVelocity * r.x);
                 float vNormal = vRel.dot(wallNormal);
@@ -692,7 +969,6 @@ void PhysicsWorld::resolveRigidWallCollisions(RigidBody& b) {
                     
                     b.applyImpulse(wallNormal * j, r);
 
-                    // 摩擦力
                     vRel = b.velocity + Vec2f(-b.angularVelocity * r.y, b.angularVelocity * r.x);
                     Vec2f tangent(-wallNormal.y, wallNormal.x);
                     float vTangent = vRel.dot(tangent);

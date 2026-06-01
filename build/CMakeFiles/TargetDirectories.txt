@@ -1,5 +1,0 @@
-D:/c++big_homework/build/CMakeFiles/QtTest.dir
-D:/c++big_homework/build/CMakeFiles/edit_cache.dir
-D:/c++big_homework/build/CMakeFiles/rebuild_cache.dir
-D:/c++big_homework/build/CMakeFiles/QtTest_autogen_timestamp_deps.dir
-D:/c++big_homework/build/CMakeFiles/QtTest_autogen.dir

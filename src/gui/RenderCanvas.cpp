@@ -167,16 +167,17 @@ void RenderCanvas::paintGL() {
   glClear(GL_COLOR_BUFFER_BIT);
 
   const auto &particles = m_world->getParticles();
-  if (!particles.empty()) {
+  int pCount = particles.count;
+  if (pCount > 0) {
     std::vector<ParticleVertex> vertexData;
-    vertexData.reserve(particles.size());
+    vertexData.reserve(pCount);
 
-    for (const auto &p : particles) {
+    for (int i = 0; i < pCount; ++i) {
       ParticleVertex v;
-      v.x = p.position.x;
-      v.y = p.position.y;
+      v.x = particles.posX[i];
+      v.y = particles.posY[i];
 
-      if (p.type == ParticleType::Fluid) {
+      if (particles.type[i] == ParticleType::Fluid) {
         // 流体粒子视觉半径 = SPH 影响半径的一半，让水流连成一片
         v.size = m_world->config.fluidRadius * 0.5f;
         v.r = 0.0f;
@@ -185,7 +186,7 @@ void RenderCanvas::paintGL() {
         v.a = 210.0f / 255.0f;
       } else {
         // 普通粒子保持原始半径
-        v.size = p.radius;
+        v.size = particles.radius[i];
         v.r = 60.0f / 255.0f;
         v.g = 150.0f / 255.0f;
         v.b = 250.0f / 255.0f;
@@ -319,7 +320,7 @@ void RenderCanvas::drawPerformanceOverlay(QPainter &painter) {
                    QString("FPS:          %1").arg(m_fps, 0, 'f', 1));
   painter.drawText(
       overlayX + 15, startTextY + lineSpacing,
-      QString("Particles:    %1").arg(m_world->getParticles().size()));
+      QString("Particles:    %1").arg(m_world->getParticles().count));
   painter.drawText(
       overlayX + 15, startTextY + lineSpacing * 2,
       QString("Physics Time: %1 ms").arg(m_physicsTimeMs, 0, 'f', 2));

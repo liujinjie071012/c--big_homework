@@ -11,6 +11,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_PREFIX_PATH "D:/QT/6.11.1/mingw_64" CACHE PATH "")
 
 find_package(Qt6 COMPONENTS Widgets OpenGLWidgets REQUIRED)
+find_package(OpenMP REQUIRED)
 
 # 源代码列表
 set(SOURCES
@@ -25,4 +26,4 @@ set(SOURCES
 )
 
 add_executable(QtTest ${SOURCES})
-target_link_libraries(QtTest PRIVATE Qt6::Widgets Qt6::OpenGLWidgets)
+target_link_libraries(QtTest PRIVATE Qt6::Widgets Qt6::OpenGLWidgets OpenMP::OpenMP_CXX)

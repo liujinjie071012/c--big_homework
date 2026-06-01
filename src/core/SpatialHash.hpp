@@ -8,19 +8,23 @@ public:
     struct Entry {
         int key;        // 空间网格的哈希键值
         int index;      // 粒子/实体的原始索引
+        Vec2f pos;      // 【终极优化】直接缓存粒子位置，消除跨内存随机访问的 Cache Miss
     };
 
     SpatialHash(float cellSize, int tableSize = 100003);
 
-    // 清除并根据粒子位置列表重建哈希网格 (可接受数组指针，便于不同实体共用)
+    // 清除并根据粒子位置列表重建哈希网格 (支持 SoA 与旧 AoS 兼容接口)
+    void build(const float* posX, const float* posY, int count);
     void build(const Vec2f* positions, int count);
     void build(const std::vector<Vec2f>& positions);
 
-    // 查询给定点周围一定半径内的所有粒子索引
+    // 查询给定点周围一定半径内的所有粒子索引，支持最大邻居截断防止 O(N^2)
     void query(const Vec2f& pos, float searchRadius, 
-               const Vec2f* positions, std::vector<int>& outNeighbors) const;
+               const float* posX, const float* posY, std::vector<int>& outNeighbors, int maxNeighbors = 40) const;
     void query(const Vec2f& pos, float searchRadius, 
-               const std::vector<Vec2f>& positions, std::vector<int>& outNeighbors) const;
+               const Vec2f* positions, std::vector<int>& outNeighbors, int maxNeighbors = 40) const;
+    void query(const Vec2f& pos, float searchRadius, 
+               const std::vector<Vec2f>& positions, std::vector<int>& outNeighbors, int maxNeighbors = 40) const;
 
     // 清空哈希表
     void clear();

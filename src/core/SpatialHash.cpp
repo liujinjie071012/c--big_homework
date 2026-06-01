@@ -1,5 +1,6 @@
 #include "SpatialHash.hpp"
 #include <algorithm>
+#include <cmath>
 
 SpatialHash::SpatialHash(float cellSize, int tableSize)
     : m_cellSize(cellSize), m_tableSize(tableSize) {
@@ -29,7 +30,7 @@ int SpatialHash::getHashKeyForPosition(const Vec2f& pos) const {
     return getHashKey(gx, gy);
 }
 
-void SpatialHash::build(const Vec2f* positions, int count) {
+void SpatialHash::build(const float* posX, const float* posY, int count) {
     if (count == 0) {
         clear();
         return;
@@ -37,15 +38,16 @@ void SpatialHash::build(const Vec2f* positions, int count) {
 
     m_entries.resize(count);
     
-    // 1. 计数：统计每个哈希键拥有的粒子数量
+    // 1. 计数：统计每个哈希键拥拥有多少个粒子
     std::fill(m_cellStart.begin(), m_cellStart.end(), 0);
     for (int i = 0; i < count; ++i) {
-        int key = getHashKeyForPosition(positions[i]);
+        Vec2f p(posX[i], posY[i]);
+        int key = getHashKeyForPosition(p);
         m_cellStart[key]++;
-        m_entries[i] = { key, i };
+        m_entries[i] = { key, i, p };
     }
 
-    // 2. 前缀和：计算每个键在排序数组中起始的绝对索引位置
+    // 2. 前缀和：计算每个键在排序数组中的起始绝对索引位置
     int start = 0;
     for (int i = 0; i < m_tableSize; ++i) {
         int countInCell = m_cellStart[i];
@@ -56,7 +58,42 @@ void SpatialHash::build(const Vec2f* positions, int count) {
 
     // 3. 排序：利用计数排序，在 O(N) 线性时间内完成位置归档
     std::vector<Entry> sortedEntries(count);
-    std::vector<int> currentOffsets = m_cellStart; // 复制当前填充偏移量
+    std::vector<int> currentOffsets = m_cellStart; // 复制当前偏移量
+
+    for (int i = 0; i < count; ++i) {
+        int key = m_entries[i].key;
+        int destIndex = currentOffsets[key]++;
+        sortedEntries[destIndex] = m_entries[i];
+    }
+
+    m_entries = std::move(sortedEntries);
+}
+
+void SpatialHash::build(const Vec2f* positions, int count) {
+    if (count == 0) {
+        clear();
+        return;
+    }
+
+    m_entries.resize(count);
+    
+    std::fill(m_cellStart.begin(), m_cellStart.end(), 0);
+    for (int i = 0; i < count; ++i) {
+        int key = getHashKeyForPosition(positions[i]);
+        m_cellStart[key]++;
+        m_entries[i] = { key, i, positions[i] };
+    }
+
+    int start = 0;
+    for (int i = 0; i < m_tableSize; ++i) {
+        int countInCell = m_cellStart[i];
+        m_cellStart[i] = start;
+        start += countInCell;
+    }
+    m_cellStart[m_tableSize] = start;
+
+    std::vector<Entry> sortedEntries(count);
+    std::vector<int> currentOffsets = m_cellStart;
 
     for (int i = 0; i < count; ++i) {
         int key = m_entries[i].key;
@@ -72,7 +109,7 @@ void SpatialHash::build(const std::vector<Vec2f>& positions) {
 }
 
 void SpatialHash::query(const Vec2f& pos, float searchRadius, 
-                        const Vec2f* positions, std::vector<int>& outNeighbors) const {
+                        const float* posX, const float* posY, std::vector<int>& outNeighbors, int maxNeighbors) const {
     outNeighbors.clear();
     if (m_entries.empty()) return;
 
@@ -94,9 +131,13 @@ void SpatialHash::query(const Vec2f& pos, float searchRadius,
             // 遍历单元格对应的桶内元素
             for (int i = start; i < end; ++i) {
                 int pIdx = m_entries[i].index;
-                float distSq = positions[pIdx].distanceSquared(pos); // 计算两点间距离的平方
+                // Entry 内部已经缓存了位置（m_entries[i].pos），直接读取以最大化 Cache 命中率
+                float distSq = m_entries[i].pos.distanceSquared(pos);
                 if (pIdx >= 0 && distSq <= radiusSq) {
                     outNeighbors.push_back(pIdx);
+                    if (outNeighbors.size() >= static_cast<size_t>(maxNeighbors)) {
+                        return;
+                    }
                 }
             }
         }
@@ -104,6 +145,11 @@ void SpatialHash::query(const Vec2f& pos, float searchRadius,
 }
 
 void SpatialHash::query(const Vec2f& pos, float searchRadius, 
-                        const std::vector<Vec2f>& positions, std::vector<int>& outNeighbors) const {
-    query(pos, searchRadius, positions.data(), outNeighbors);
+                        const Vec2f* positions, std::vector<int>& outNeighbors, int maxNeighbors) const {
+    query(pos, searchRadius, nullptr, nullptr, outNeighbors, maxNeighbors);
+}
+
+void SpatialHash::query(const Vec2f& pos, float searchRadius, 
+                        const std::vector<Vec2f>& positions, std::vector<int>& outNeighbors, int maxNeighbors) const {
+    query(pos, searchRadius, nullptr, nullptr, outNeighbors, maxNeighbors);
 }
