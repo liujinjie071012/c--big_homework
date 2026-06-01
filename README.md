@@ -40,9 +40,11 @@
 
 ```text
 c++big_homework/
+├── .gitignore                  # Git 忽略配置文件 (过滤 build 编译缓存等临时文件)
 ├── CMakeLists.txt              # CMake 编译配置文件 (要求 C++17, 依赖 Qt6, OpenMP)
+├── build.bat                   # 一键配置、编译并生成优化二进制文件的批处理脚本 (Ninja/GCC)
 ├── main.cpp                    # 客户端主入口，强制桌面级 Core OpenGL 3.3 视口配置
-├── implementation_plan.md      # 调优实施方案文档
+├── implementation_plan.md      # 性能调优实施方案与技术架构设计文档
 ├── TROUBLESHOOTING.md          # 物理稳定性与数学鲁棒性故障排除手册
 ├── src/
 │   ├── core/                   # 物理引擎核心计算模块
